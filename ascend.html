@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>ASCEND - Blue Fog</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#020612;overflow:hidden;touch-action:manipulation;font-family:Arial;user-select:none}
+  canvas{display:block;width:100vw;height:100vh}
+  #ui{position:absolute;top:15px;left:12px;right:12px;display:flex;justify-content:space-between;pointer-events:none}
+  .box{background:rgba(0,0,0,0.7);border:1px solid #ff3300; border-radius:12px;padding:8px 14px;color:#fff;box-shadow:0 0 15px rgba(255,60,0,0.4)}
+  .box b{color:#ffaa00}
+  #cps{color:#00ff88}
+  #center{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;background:rgba(0,0,0,0.85);z-index:10}
+  #center h1{color:#ff3333;text-shadow:0 0 20px red;font-size:32px}
+  #center p{color:#aaa;margin:10px}
+  #btn{margin-top:20px;background:linear-gradient(90deg,#ff3300,#ff8800);border:0;padding:14px 40px;border-radius:30px;color:white;font-weight:bold;font-size:18px;box-shadow:0 0 20px #ff4400}
+  #tapHint{position:absolute;bottom:30px;left:0;right:0;text-align:center;color:#ffcc00;font-weight:bold;letter-spacing:1px;animation:blink 0.8s infinite}
+  @keyframes blink{50%{opacity:0.3}}
+  #flash{position:absolute;inset:0;background:white;opacity:0;pointer-events:none;z-index:5}
+</style>
+</head>
+<body>
+<div id="flash"></div>
+<div id="ui">
+  <div class="box">ASCENDED<br><b id="dist">0</b> m<br><small>BEST: <span id="best">0</span>m</small></div>
+  <div class="box">CLIMB SPEED<br><b id="cps">STOPPED</b><br><div style="width:100px;height:6px;background:#333;border-radius:3px;margin-top:4px"><div id="bar" style="height:100%;width:0%;background:linear-gradient(90deg,#ff3300,#ffff00);border-radius:3px"></div></div></div>
+</div>
+<div id="tapHint">TAP REPEATEDLY TO SPRINT UPWARDS!</div>
+<div id="center">
+  <h1 id="title">ASCEND</h1>
+  <p id="msg">The fog hides something below...</p>
+  <p id="finalDist" style="color:#ffaa00;font-size:22px;display:none"></p>
+  <button id="btn">START CLIMB</button>
+</div>
+<canvas id="c"></canvas>
+<script>
+const canvas=document.getElementById('c'), ctx=canvas.getContext('2d');
+let W,H,DPR;
+function resize(){DPR=window.devicePixelRatio||1; W=innerWidth; H=innerHeight; canvas.width=W*DPR; canvas.height=H*DPR; canvas.style.width=W+'px'; canvas.style.height=H+'px'; ctx.setTransform(DPR,0,0,DPR,0,0);}
+resize(); addEventListener('resize',resize);
+
+let running=false, distance=0, best=localStorage.getItem('ascendBest')||0;
+let clicks=0, cps=0, clickTimes=[], lastClick=0;
+let playerY=0, cameraY=0, stairs=[], fogOffset=0;
+let monsterY=0, monsterSpeed=0.8, lightningTimer=0, flashOp=0;
+let gameOver=false;
+
+document.getElementById('best').textContent=best;
+
+function genStairs(){
+  stairs=[];
+  for(let i=0;i<60;i++){
+    stairs.push({x: W*0.5 + (i%2?40:-20) + Math.sin(i*0.7)*30, y: H-100 - i*28, w: 70+Math.random()*20})
+  }
+}
+genStairs();
+
+function updateCPS(){
+  const now=Date.now();
+  clickTimes=clickTimes.filter(t=>now-t<1000);
+  cps=clickTimes.length;
+  const el=document.getElementById('cps');
+  const bar=document.getElementById('bar');
+  let label, color, width;
+  if(cps==0){label='STOPPED'; color='#555'; width=5}
+  else if(cps<3){label=`SLOW (${cps} CPS)`; color='#ffaa00'; width=20+cps*10}
+  else if(cps<7){label=`FAST (${cps} CPS)`; color='#ffff00'; width=40+cps*5}
+  else {label=`SPRINT! (${cps} CPS)`; color='#00ff88'; width=Math.min(100,50+cps*3)}
+  el.textContent=label; el.style.color=color;
+  bar.style.width=width+'%'; bar.style.background=color;
+  return cps;
+}
+
+function loop(){
+  if(!running) return;
+  requestAnimationFrame(loop);
+  const now=Date.now();
+  updateCPS();
+
+  // player move based on CPS
+  if(cps>0){
+    playerY+=cps*1.2 + cps*0.15;
+    distance=Math.floor(playerY/6);
+    document.getElementById('dist').textContent=distance;
+  }
+  cameraY = playerY - H*0.6;
+  
+  // monster logic - faster when you are slow
+  let monsterTarget = playerY - H + 80;
+  if(cps<3) monsterSpeed+=0.04;
+  else if(cps>10) monsterSpeed=Math.max(0.6, monsterSpeed-0.02);
+  else monsterSpeed+=0.01;
+  monsterY += monsterSpeed;
+  if(monsterY < monsterTarget - 200) monsterY = monsterTarget - 200;
+
+  // lightning
+  lightningTimer-=16;
+  if(lightningTimer<=0){
+    if(Math.random()<0.015){
+      flashOp=0.85;
+      document.getElementById('flash').style.opacity=0.8;
+      lightningTimer=2000+Math.random()*3000;
+      setTimeout(()=>document.getElementById('flash').style.opacity=0,120);
+    }
+  }
+  if(flashOp>0) flashOp*=0.9;
+
+  // generate new stairs
+  while(stairs[stairs.length-1].y > cameraY - 100){
+    let last=stairs[stairs.length-1];
+    stairs.push({x: W*0.5 + (Math.random()-0.5)*80 + Math.sin(stairs.length*0.7)*30, y: last.y - 28 - Math.random()*5, w: 70+Math.random()*20})
+  }
+  while(stairs[0].y < cameraY + H + 200) stairs.shift();
+
+  // game over
+  if(monsterY > playerY - 10){
+    endGame();
+    return;
+  }
+
+  draw();
+}
+
+function draw(){
+  // background - blue fog
+  let grad=ctx.createLinearGradient(0,0,0,H);
+  grad.addColorStop(0,'#0a1a3a');
+  grad.addColorStop(0.5,'#08142e');
+  grad.addColorStop(1,'#020612');
+  ctx.fillStyle=grad;
+  ctx.fillRect(0,0,W,H);
+
+  // fog layers
+  fogOffset+=0.5;
+  ctx.fillStyle='rgba(60,120,255,0.04)';
+  for(let i=0;i<3;i++){
+    let y=(fogOffset* (0.3+i*0.2) + i*200) % (H+200) -100;
+    ctx.beginPath();
+    ctx.ellipse(W*0.5 + Math.sin(fogOffset*0.01+i)*100, y, W*0.8, 80, 0,0,Math.PI*2);
+    ctx.fill();
+  }
+
+  // stairs
+  ctx.save();
+  ctx.translate(0,-cameraY);
+  for(let s of stairs){
+    let screenY=s.y;
+    if(screenY < cameraY-50 || screenY > cameraY+H+50) continue;
+    // shadow
+    ctx.fillStyle='rgba(0,0,0,0.5)';
+    ctx.fillRect(s.x+2,s.y+2,s.w,10);
+    // stair
+    let isNear=Math.abs(screenY - playerY) < 120;
+    ctx.fillStyle=isNear?'#3a3f4a':'#1e2330';
+    ctx.fillRect(s.x,s.y,s.w,8);
+    ctx.fillStyle=isNear?'#5a6070':'#2a3040';
+    ctx.fillRect(s.x,s.y,s.w,3);
+  }
+
+  // player - stickman with torch
+  let px=W*0.5, py=playerY;
+  ctx.strokeStyle='#ffffff';
+  ctx.lineWidth=3;
+  ctx.lineCap='round';
+  // torch glow
+  let glow=ctx.createRadialGradient(px+12, py-8, 0, px+12, py-8, 90);
+  glow.addColorStop(0,'rgba(255,180,80,0.5)');
+  glow.addColorStop(0.3,'rgba(255,120,30,0.2)');
+  glow.addColorStop(1,'rgba(0,0,0,0)');
+  ctx.fillStyle=glow;
+  ctx.beginPath(); ctx.arc(px+12, py-8, 90,0,Math.PI*2); ctx.fill();
+  // body
+  ctx.beginPath();
+  ctx.arc(px, py-22, 7,0,Math.PI*2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px,py-15); ctx.lineTo(px,py); ctx.stroke();
+  let legPhase=Date.now()*0.02 * (cps||1);
+  ctx.beginPath(); ctx.moveTo(px,py); ctx.lineTo(px-6+Math.sin(legPhase)*4, py+14); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(px,py); ctx.lineTo(px+6+Math.sin(legPhase+Math.PI)*4, py+14); ctx.stroke();
+  // arm holding torch
+  ctx.beginPath(); ctx.moveTo(px,py-10); ctx.lineTo(px+12,py-12); ctx.stroke();
+  // torch
+  ctx.fillStyle='#ff8800';
+  ctx.beginPath(); ctx.arc(px+14,py-14,5,0,Math.PI*2); ctx.fill();
+  ctx.fillStyle='#ffffaa';
+  ctx.beginPath(); ctx.arc(px+14,py-14,2.5,0,Math.PI*2); ctx.fill();
+
+  // monster - realistic shadow with eyes
+  let my=monsterY;
+  let monsterScreenY=my;
+  let distToPlayer=playerY-my;
+  let visible=distToPlayer < 350;
+  if(visible){
+    // body shadow rising
+    let alpha=Math.min(0.9, (350-distToPlayer)/200);
+    ctx.fillStyle=`rgba(0,0,0,${alpha})`;
+    ctx.beginPath();
+    ctx.ellipse(px, my+20, 80+distToPlayer*0.1, 40, 0,0,Math.PI*2);
+    ctx.fill();
+    // eyes
+    if(distToPlayer<250){
+      ctx.shadowColor='red'; ctx.shadowBlur=20;
+      ctx.fillStyle='#ff0000';
+      ctx.beginPath(); ctx.arc(px-12, my-5, 6,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(px+12, my-5, 6,0,Math.PI*2); ctx.fill();
+      ctx.shadowBlur=0;
+      // inner white
+      ctx.fillStyle='rgba(255,200,200,0.9)';
+      ctx.beginPath(); ctx.arc(px-11, my-6, 2,0,Math.PI*2); ctx.fill();
+      ctx.beginPath(); ctx.arc(px+13, my-6, 2,0,Math.PI*2); ctx.fill();
+    }
+    // fog around monster
+    let mGlow=ctx.createRadialGradient(px, my, 0, px, my, 200);
+    mGlow.addColorStop(0,'rgba(255,0,0,0.15)');
+    mGlow.addColorStop(1,'rgba(0,0,0,0)');
+    ctx.fillStyle=mGlow;
+    ctx.beginPath(); ctx.arc(px, my, 200,0,Math.PI*2); ctx.fill();
+  }
+
+  ctx.restore();
+
+  // vignette
+  let vig=ctx.createRadialGradient(W/2,H/2,0,W/2,H/2,H*0.8);
+  vig.addColorStop(0,'rgba(0,0,0,0)');
+  vig.addColorStop(1,'rgba(0,0,0,0.85)');
+  ctx.fillStyle=vig;
+  ctx.fillRect(0,0,W,H);
+}
+
+function endGame(){
+  running=false; gameOver=true;
+  if(distance>best){best=distance; localStorage.setItem('ascendBest',best)}
+  document.getElementById('best').textContent=best;
+  const center=document.getElementById('center');
+  center.style.display='flex';
+  document.getElementById('title').innerHTML='<span style="font-size:40px">💀</span><br>YOU WERE CONSUMED!';
+  document.getElementById('title').style.color='#ff4444';
+  document.getElementById('msg').textContent='THE CREATURE DRAGGED YOU INTO THE VOID';
+  document.getElementById('finalDist').style.display='block';
+  document.getElementById('finalDist').innerHTML=`DISTANCE: <b style="color:#ffcc00">${distance}m</b> | BEST: <b style="color:#ff4444">${best}m</b>`;
+  document.getElementById('btn').textContent='TRY AGAIN';
+  document.getElementById('tapHint').style.display='none';
+}
+
+function startGame(){
+  distance=0; playerY=0; cameraY=0; monsterY=-H; monsterSpeed=0.8;
+  clickTimes=[]; cps=0; gameOver=false; genStairs();
+  document.getElementById('center').style.display='none';
+  document.getElementById('dist').textContent='0';
+  document.getElementById('tapHint').style.display='block';
+  running=true;
+  loop();
+}
+
+canvas.addEventListener('pointerdown', (e)=>{
+  if(gameOver) return;
+  if(!running) return;
+  const now=Date.now();
+  clickTimes.push(now);
+  // haptic
+  if(navigator.vibrate) navigator.vibrate(10);
+  // click effect
+  let rect=canvas.getBoundingClientRect();
+  let x=e.clientX-rect.left, y=e.clientY-rect.top;
+  ctx.fillStyle='rgba(255,200,0,0.6)';
+});
+
+document.getElementById('btn').addEventListener('click', startGame);
+document.getElementById('btn').addEventListener('touchstart', (e)=>{e.preventDefault(); startGame()}, {passive:false});
+
+draw();
+</script>
+</body>
+</html>
